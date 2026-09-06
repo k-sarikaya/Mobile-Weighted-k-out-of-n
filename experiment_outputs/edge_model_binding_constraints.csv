@@ -1,0 +1,13 @@
+model,q0,binding,count
+bernoulli,,capacity,4598
+bernoulli,,connectivity,389
+bernoulli,,delay,13
+deterministic,0.3,capacity,4836
+deterministic,0.3,connectivity,150
+deterministic,0.3,delay,14
+deterministic,0.5,capacity,4766
+deterministic,0.5,connectivity,205
+deterministic,0.5,delay,29
+deterministic,0.7,capacity,4682
+deterministic,0.7,connectivity,286
+deterministic,0.7,delay,32

@@ -1,19 +1,52 @@
-# Figure to Code Mapping Manifest
+# Figure and table mapping
 
-This document maps the figures presented in the revised RESS manuscript to the corresponding plotting functions in the simulation script.
+Which script produces each figure and table in the paper, and from which data.
 
-| Figure Number | Filename | Description | Generating Code Function | Source Data |
-|---|---|---|---|---|
-| **Figure 1** | `fig1_framework_schematic.pdf` | Conceptual block diagram of the dual-layer MW-$k$/$n$:G reliability model. | TikZ source in `framework_fig.tex` | N/A |
-| **Figure 3** | `fig3_S1_spatial_results.pdf` | Scenario S1 (Spatial-only) mission reliability and layer status. | `plot_results.py::plot_s1()` | `results/S1_Spatial.csv` |
-| **Figure 4** | `fig4_S2_temporal_results.pdf` | Scenario S2 (Temporal-only) mission reliability and layer status. | `plot_results.py::plot_s2()` | `results/S2_Temporal.csv` |
-| **Figure 5** | `fig5_S3_joint_results.pdf` | Scenario S3 (Joint Spatio-Temporal) and Copula comparison. | `plot_results.py::plot_s3()` | `results/S3_Joint_*.csv` |
-| **Figure 6** | `fig6_mttf_comparison.pdf` | Mean Time to Failure (MTTF) across baseline and joint scenarios. | `plot_results.py::plot_mttf()` | `results/*.csv` |
-| **Figure 7** | `fig7_sensitivity_analysis.pdf` | Continuous sensitivity sweep of MTTF against correlation $\rho$ and tail dependence $\nu$. | `plot_results.py::plot_sensitivity()` | `results/sensitivity_analysis.csv` |
+## Figures
 
-## Execution
-To generate all figures, run:
+| Figure | Content | Produced by | Source data |
+|---|---|---|---|
+| 1 | Dual-layer framework schematic | `framework_fig.tex` (standalone TikZ; `pdflatex framework_fig.tex`) | none (schematic, no simulation data) |
+| 2 | Monte Carlo engine verification against the closed-form benchmark | `run_experiments.py::verify_engine()` | `experiment_outputs/analytic_benchmark_curves.csv`, `analytic_benchmark.csv` |
+| 3 | Scenario setup: heterogeneous swarm topology and spiral formation expansion | static illustration of the configuration in `parameters.md` | none (schematic, no simulation data) |
+| 4 | Scenario S1, spatial degradation only | `plot_results.py::plot_s1()` | `results/S1_Spatial.csv` |
+| 5 | Scenario S2, temporal degradation only | `plot_results.py::plot_s2()` | `results/S2_Temporal.csv` |
+| 6 | Scenario S3, joint spatio-temporal with copula dependence | `plot_results.py::plot_s3()` | `results/S3_Joint_*.csv` |
+| 7 | Scenario S3 baseline comparison | `plot_results.py::plot_s3_baselines()` | `results/S3_Joint_T.csv` |
+| 8 | Dependence-strength sweep over Kendall's tau | `run_experiments.py::make_correlation_figure()` | `experiment_outputs/correlation_sweep_summary.csv`, `correlation_sweep_simultaneous_bands.csv` |
+| 9 | Capacity-threshold sweep with paired simultaneous bands | `run_experiments.py::make_figures()` | `experiment_outputs/threshold_sweep_summary.csv`, `threshold_sweep_simultaneous_bands.csv` |
+
+## Tables
+
+| Table | Content | Produced by | Source data |
+|---|---|---|---|
+| 2 | RMST, confidence intervals and horizon survival across degradation regimes | `run_experiments.py::run_main_scenarios()` | `experiment_outputs/main_scenario_summary.csv`, `main_scenario_runs.csv.gz`, `main_binding_constraints.csv` |
+| 3 | Paired edge-model sensitivity and binding-constraint shares | `run_experiments.py::run_edge_sensitivity()` | `experiment_outputs/edge_model_sensitivity_summary.csv`, `edge_model_paired_differences.csv`, `edge_model_binding_constraints.csv` |
+| 4 | Design zones by normalized capacity threshold | `run_experiments.py::design_zones()` | `experiment_outputs/design_zones.csv`, `threshold_crossover.csv` |
+| A.1 | AMOVFLY energy-model calibration | `amovfly_regression.py` | flight-log regression, see Appendix A |
+
+## Supporting diagnostics
+
+These are reported in the text rather than as numbered floats.
+
+| Quantity | Produced by | Output |
+|---|---|---|
+| Copula sampler validation (Kolmogorov-Smirnov, Kendall's tau) | `run_experiments.py::validate_copulas()` | `experiment_outputs/copula_sampler_validation.csv` |
+| Homothety residual and SIR scale invariance of the prescribed trajectory | `run_experiments.py::validate_geometry()` | `experiment_outputs/geometry_scale_invariance.csv` |
+| Run configuration: replications, horizon, threshold grid, copulas, edge models, seed scheme | `run_experiments.py::main()` | `experiment_outputs/experiment_metadata.json` |
+
+## Note on two unused plotting functions
+
+`plot_results.py` also defines `plot_mttf()` and `plot_sensitivity()`. Neither
+corresponds to a figure in the paper: mean time to failure is not reported
+(RMST(T) is used instead, because the mission horizon is finite and a
+substantial fraction of replications survive it), and the dependence sweep is
+produced by `run_experiments.py` so that it carries paired simultaneous bands.
+
+## Regenerating everything
+
 ```bash
-python plot_results.py
+python run_experiments.py    # Figures 2, 8, 9 and Tables 2-4
+python run_scenarios.py      # scenario curves into results/
+python plot_results.py       # Figures 4-7 into figures/
 ```
-Figures will be written directly to the `RESS_v2/figures/` directory as high-resolution PDFs.

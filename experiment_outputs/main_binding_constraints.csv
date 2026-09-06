@@ -1,0 +1,12 @@
+scenario,binding,count
+S1_Spatial,connectivity,358
+S1_Spatial,delay,3566
+S1_Spatial,none_within_horizon,1076
+S2_Temporal,capacity,4949
+S2_Temporal,delay,3
+S2_Temporal,none_within_horizon,48
+S3_Joint_Clayton,from_threshold_sweep,5000
+S3_Joint_Gaussian,from_threshold_sweep,5000
+S3_Joint_Gumbel,from_threshold_sweep,5000
+S3_Joint_Independence,from_threshold_sweep,5000
+S3_Joint_Student_t,from_threshold_sweep,5000

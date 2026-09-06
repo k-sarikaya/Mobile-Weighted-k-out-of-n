@@ -21,7 +21,7 @@ plt.rcParams.update({
 })
 
 res_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
-fig_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "figures")
+fig_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
 
 # Ensure output directory exists
 os.makedirs(fig_dir, exist_ok=True)
