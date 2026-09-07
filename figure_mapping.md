@@ -1,20 +1,20 @@
 # Figure and table mapping
 
-Which script produces each figure and table in the paper, and from which data.
+Which script produces each figure and table in the paper, from which data, and where the rendered outputs are stored.
 
 ## Figures
 
-| Figure | Content | Produced by | Source data |
-|---|---|---|---|
-| 1 | Dual-layer framework schematic | `framework_fig.tex` (standalone TikZ; `pdflatex framework_fig.tex`) | none (schematic, no simulation data) |
-| 2 | Monte Carlo engine verification against the closed-form benchmark | `run_experiments.py::verify_engine()` | `experiment_outputs/analytic_benchmark_curves.csv`, `analytic_benchmark.csv` |
-| 3 | Scenario setup: heterogeneous swarm topology and spiral formation expansion | static illustration of the configuration in `parameters.md` | none (schematic, no simulation data) |
-| 4 | Scenario S1, spatial degradation only | `plot_results.py::plot_s1()` | `results/S1_Spatial.csv` |
-| 5 | Scenario S2, temporal degradation only | `plot_results.py::plot_s2()` | `results/S2_Temporal.csv` |
-| 6 | Scenario S3, joint spatio-temporal with copula dependence | `plot_results.py::plot_s3()` | `results/S3_Joint_*.csv` |
-| 7 | Scenario S3 baseline comparison | `plot_results.py::plot_s3_baselines()` | `results/S3_Joint_T.csv` |
-| 8 | Dependence-strength sweep over Kendall's tau | `run_experiments.py::make_correlation_figure()` | `experiment_outputs/correlation_sweep_summary.csv`, `correlation_sweep_simultaneous_bands.csv` |
-| 9 | Capacity-threshold sweep with paired simultaneous bands | `run_experiments.py::make_figures()` | `experiment_outputs/threshold_sweep_summary.csv`, `threshold_sweep_simultaneous_bands.csv` |
+| Figure | Content | Output File in `figures/` | Produced by | Source data |
+|---|---|---|---|---|
+| 1 | Dual-layer framework schematic | `Figure_1.pdf` / `.png` | `framework_fig.tex` (standalone TikZ; `pdflatex framework_fig.tex`) | none (schematic, no simulation data) |
+| 2 | Monte Carlo engine verification against the closed-form benchmark | `Figure_2_verification.pdf` / `.png` | `run_experiments.py::verify_engine()` | `experiment_outputs/analytic_benchmark_curves.csv`, `analytic_benchmark.csv` |
+| 3 | Scenario setup: heterogeneous swarm topology and spiral formation expansion | `Figure_3.png` / `.pdf` | static illustration of the configuration in `parameters.md` | none (schematic, no simulation data) |
+| 4 | Scenario S1, spatial degradation only | `Figure_4_S1_spatial_results.pdf` / `.png` (alias: `fig3_...`) | `plot_results.py::plot_s1()` | `results/S1_Spatial.csv` |
+| 5 | Scenario S2, temporal degradation only | `Figure_5_S2_temporal_results.pdf` / `.png` (alias: `fig4_...`) | `plot_results.py::plot_s2()` | `results/S2_Temporal.csv` |
+| 6 | Scenario S3, joint spatio-temporal with copula dependence | `Figure_6_S3_joint_results.pdf` / `.png` (alias: `fig5_...`) | `plot_results.py::plot_s3()` | `results/S3_Joint_*.csv` |
+| 7 | Scenario S3 baseline comparison | `Figure_7_S3_baselines_comparison.pdf` / `.png` (alias: `fig5b_...`) | `plot_results.py::plot_s3_baselines()` | `results/S3_Joint_T.csv` |
+| 8 | Dependence-strength sweep over Kendall's tau | `Figure_8_correlation_sweep.pdf` / `.png` | `run_experiments.py::make_correlation_figure()` | `experiment_outputs/correlation_sweep_summary.csv`, `correlation_sweep_simultaneous_bands.csv` |
+| 9 | Capacity-threshold sweep with paired simultaneous bands | `Figure_9_threshold_sensitivity.pdf` / `.png` | `run_experiments.py::make_figures()` | `experiment_outputs/threshold_sweep_summary.csv`, `threshold_sweep_simultaneous_bands.csv` |
 
 ## Tables
 
