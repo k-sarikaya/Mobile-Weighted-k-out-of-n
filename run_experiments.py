@@ -37,6 +37,12 @@ DEFAULT_K = 18
 COPULAS = ("independence", "gaussian", "student_t", "clayton", "gumbel")
 WORKERS = min(8, max(1, cpu_count() - 1))
 
+# Nominal simultaneous coverage of the sup-t bootstrap bands.  The bootstrap
+# statistic is max_k |t_k|, which already accounts for both tails, so the
+# 1 - alpha quantile of that statistic yields 100(1 - alpha)% simultaneous
+# coverage over the whole family of thresholds.
+SUP_T_LEVEL = 0.95
+
 
 def swarm_definition():
     # Three high-capacity, five medium-capacity, and four low-capacity agents.
@@ -87,6 +93,10 @@ def positions_and_soc(weights, mode, rng, max_steps=MAX_STEPS):
     xy = np.zeros((max_steps, n, 2))
     active_from_battery = np.ones((max_steps, n), dtype=bool)
     latent_wind = 0.0
+    # The realised latent stress path is returned so that a dependence model
+    # can be driven by the same environmental process that already moves the
+    # formation and drains the batteries, rather than by a separate device.
+    stress = np.zeros(max_steps)
 
     for step in range(max_steps):
         if mode in ("S1", "S3"):
@@ -96,6 +106,7 @@ def positions_and_soc(weights, mode, rng, max_steps=MAX_STEPS):
                 latent_wind = 0.85 * latent_wind + math.sqrt(1 - 0.85**2) * rng.normal()
                 wind_speed = float(np.clip(10.0 + 2.5 * latent_wind, 5.0, 15.0))
                 wind_factor = 1.0 + 0.01 * (wind_speed - 10.0)
+                stress[step] = latent_wind
             else:
                 wind_speed, wind_factor = 0.0, 1.0
             radius = (20.0 + step * 2.5) * speed * wind_factor
@@ -112,7 +123,7 @@ def positions_and_soc(weights, mode, rng, max_steps=MAX_STEPS):
             draw = (0.003 + 0.0001 * velocity) * speed
         soc -= draw
         active_from_battery[step] = soc > 0.10
-    return xy, active_from_battery
+    return xy, active_from_battery, stress
 
 
 def pdr(distance):
@@ -172,6 +183,93 @@ def graph_metrics(xy, active, edge_rng, latency_rng, edge_model="bernoulli", q0=
     return largest_weight, max_latency, len(largest)
 
 
+def rho_from_tau(tau):
+    """Invert Kendall's tau for the elliptical families."""
+    return math.sin(math.pi * tau / 2.0)
+
+
+# ---------------------------------------------------------------------------
+# Environmental frailty arm -- FORMULATION ONLY, NOT USED BY ANY REPORTED
+# RESULT.
+#
+# The functions whose names contain "frailty" -- frailty_lifetimes below,
+# and further down _frailty_z_paths, calibrate_frailty_baseline,
+# frailty_tau_from_sigma, solve_sigma_for_tau, frailty_job,
+# frailty_marginal_diagnostic, frailty_calibration_table and
+# run_frailty_sweep -- together implement the second time-varying dependence
+# mechanism written down in Section 3.3, Eq. (22).  They are the only
+# functions in this file with that status; everything else feeds a reported
+# result.
+#
+# No figure, table, or number in the paper comes from this code, no CSV in
+# experiment_outputs/ is produced by it, verify_claims.py makes no assertion
+# about it, and main() calls none of it -- the functions are reachable only if
+# called directly.  The reason is stated in the paper: the mechanism cannot be
+# calibrated to a target Kendall's tau while holding the marginals fixed over
+# the range of interest, so it is reported as a formulation and listed as
+# future work (Section 7.3 and Section 8, item 4).  The evaluated
+# time-varying arm is the phase-switching copula (Eq. (21),
+# phase_copula_lifetimes), which does preserve the marginals exactly.
+#
+# The code is kept so the formulation is inspectable and so the calibration
+# failure can be reproduced: frailty_marginal_diagnostic() records the sigma
+# range over which the marginal error exceeds MARGINAL_ERROR_TOL.
+# ---------------------------------------------------------------------------
+
+
+def frailty_lifetimes(rng, stress, rates, sigma, w_persistent, baseline, max_steps):
+    """Lifetimes driven by a shared stress process with a persistent component.
+
+        Z(t) = sigma * ( sqrt(w) * W + sqrt(1 - w) * A(t) ),   Var Z(t) = sigma^2
+
+    A(t) is the standardised AR(1) environmental path already simulated for the
+    trajectory and the battery drain, and W ~ N(0,1) is drawn once per mission.
+    The mixture matters: a purely mean-reverting A(t) averages out over a
+    120-step horizon, so it induces almost no association between lifetimes.
+    The persistent component W does not average out, so w controls how much
+    dependence the mechanism can actually generate, while the A(t) part keeps
+    the association time-varying within the mission.
+
+    The conditional hazard is lambda_i(t | Z) = baseline_i * exp(Z(t)).  The
+    baseline is NOT the nominal rate: it is recalibrated per (sigma, w) by
+    calibrate_frailty_baseline so that the marginal survival matches the
+    nominal exponential.  Without that step the arm would confound dependence
+    with a shifted marginal, since by Jensen's inequality
+    E[exp(-integral)] != exp(-E[integral]).
+    """
+    if sigma == 0.0:
+        u = rng.uniform(size=len(rates))
+        return -np.log1p(-u) / rates
+    w_draw = rng.normal()
+    z = sigma * (math.sqrt(w_persistent) * w_draw
+                 + math.sqrt(1.0 - w_persistent) * stress)
+    cumulative = np.cumsum(np.outer(np.exp(z), baseline), axis=0)
+    threshold = rng.exponential(size=len(rates))
+    exceeded = cumulative >= threshold
+    any_exceeded = exceeded.any(axis=0)
+    first = np.argmax(exceeded, axis=0).astype(float)
+    return np.where(any_exceeded, first, np.inf)
+
+
+def phase_copula_lifetimes(rng, rates, family, tau_early, tau_late, boundary, df=3):
+    """Piecewise-constant dependence with exactly preserved marginals.
+
+    A component that fails before the phase boundary draws its lifetime from a
+    copula calibrated to tau_early; a component that survives the boundary
+    draws a fresh residual lifetime from a copula calibrated to tau_late.
+    Because the marginal lifetimes are exponential and therefore memoryless,
+    the residual distribution after the boundary is again exponential with the
+    same rate, so switching the copula at the boundary changes the dependence
+    structure without perturbing any marginal.  This gives a phase-specific
+    dependence parameter that does not require phase-resolved failure data.
+    """
+    u_early = copula_uniforms(rng, family, rho_from_tau(tau_early), df)
+    t_early = -np.log1p(-u_early) / rates
+    u_late = copula_uniforms(rng, family, rho_from_tau(tau_late), df)
+    t_late = -np.log1p(-u_late) / rates
+    return np.where(t_early <= boundary, t_early, boundary + t_late)
+
+
 def simulate_trajectory(scenario, seed, max_steps=MAX_STEPS, edge_model="bernoulli", q0=0.5):
     streams = np.random.SeedSequence([20260822, seed]).spawn(4)
     rng = np.random.default_rng(streams[0])
@@ -179,11 +277,23 @@ def simulate_trajectory(scenario, seed, max_steps=MAX_STEPS, edge_model="bernoul
     edge_rng = np.random.default_rng(streams[2])
     latency_rng = np.random.default_rng(streams[3])
     weights = swarm_definition()
-    xy, battery_ok = positions_and_soc(weights, scenario["mode"], rng, max_steps)
+    xy, battery_ok, stress = positions_and_soc(weights, scenario["mode"], rng, max_steps)
     if scenario["mode"] in ("S2", "S3"):
-        u = copula_uniforms(copula_rng, scenario["copula"], scenario.get("rho", 0.6), scenario.get("df", 3))
-        rates = np.array([0.005] * 3 + [0.008] * 5 + [0.012] * 4)
-        failure_time = -np.log1p(-u) / rates
+        rates = FAILURE_RATES
+        kind = scenario.get("dependence", "copula")
+        if kind == "frailty":
+            failure_time = frailty_lifetimes(
+                copula_rng, stress, rates, scenario.get("sigma", 0.0),
+                scenario.get("w_persistent", FRAILTY_W),
+                scenario.get("baseline", rates), max_steps)
+        elif kind == "phase_copula":
+            failure_time = phase_copula_lifetimes(
+                copula_rng, rates, scenario.get("family", "gaussian"),
+                scenario.get("tau_early", 0.41), scenario.get("tau_late", 0.41),
+                scenario.get("boundary", max_steps // 2), scenario.get("df", 3))
+        else:
+            u = copula_uniforms(copula_rng, scenario["copula"], scenario.get("rho", 0.6), scenario.get("df", 3))
+            failure_time = -np.log1p(-u) / rates
     else:
         failure_time = np.full(12, np.inf)
 
@@ -329,16 +439,48 @@ def run_main_scenarios(n_runs, max_steps=MAX_STEPS, threshold_raw=None):
     return raw, summary
 
 
-def validate_copulas(n=10000):
-    rows = []
+VALIDATION_SEEDS = tuple(range(10))
+
+
+def validate_copulas(n=10000, seeds=VALIDATION_SEEDS):
+    """Sampler diagnostics repeated over independent seeds.
+
+    A single seed makes a borderline Kolmogorov-Smirnov p-value hard to read:
+    at n = 10000 an occasional p below 0.05 is expected even from an exact
+    sampler.  Each family is therefore validated on several independent draws
+    and the per-seed results are summarised, so the diagnostic reports a
+    distribution rather than one realisation.
+    """
+    per_seed, rows = [], []
     for name in COPULAS:
-        rng = np.random.default_rng(np.random.SeedSequence([20260822, 9000 + COPULAS.index(name)]))
-        sample = np.array([copula_uniforms(rng, name, 0.6, 3) for _ in range(n)])
-        u1, u2 = sample[:, 0], sample[:, 1]
-        tau = kendalltau(u1, u2).statistic
-        ks = kstest(u1, "uniform")
-        tail = np.mean((u1 < 0.05) & (u2 < 0.05)) / 0.05
-        rows.append({"copula": name, "empirical_kendall_tau": tau, "KS_stat": ks.statistic, "KS_pvalue": ks.pvalue, "lower_tail_ratio_at_0.05": tail})
+        stats = []
+        for s in seeds:
+            rng = np.random.default_rng(
+                np.random.SeedSequence([20260822, 9000 + COPULAS.index(name), int(s)]))
+            sample = np.array([copula_uniforms(rng, name, 0.6, 3) for _ in range(n)])
+            u1, u2 = sample[:, 0], sample[:, 1]
+            tau = float(kendalltau(u1, u2).statistic)
+            ks = kstest(u1, "uniform")
+            tail = float(np.mean((u1 < 0.05) & (u2 < 0.05)) / 0.05)
+            rec = {"copula": name, "seed": int(s), "n": int(n),
+                   "empirical_kendall_tau": tau, "KS_stat": float(ks.statistic),
+                   "KS_pvalue": float(ks.pvalue), "lower_tail_ratio_at_0.05": tail}
+            per_seed.append(rec)
+            stats.append(rec)
+        d = pd.DataFrame(stats)
+        rows.append({
+            "copula": name,
+            "n_seeds": len(seeds), "n_per_seed": int(n),
+            "empirical_kendall_tau": d.empirical_kendall_tau.mean(),
+            "kendall_tau_sd": d.empirical_kendall_tau.std(ddof=1),
+            "KS_stat_mean": d.KS_stat.mean(),
+            "KS_pvalue_min": d.KS_pvalue.min(),
+            "KS_pvalue_median": d.KS_pvalue.median(),
+            "KS_rejections_at_5pct": int((d.KS_pvalue < 0.05).sum()),
+            "lower_tail_ratio_at_0.05": d["lower_tail_ratio_at_0.05"].mean(),
+            "lower_tail_ratio_sd": d["lower_tail_ratio_at_0.05"].std(ddof=1),
+        })
+    pd.DataFrame(per_seed).to_csv(OUT / "copula_sampler_validation_by_seed.csv", index=False)
     out = pd.DataFrame(rows)
     out.to_csv(OUT / "copula_sampler_validation.csv", index=False)
     return out
@@ -346,6 +488,369 @@ def validate_copulas(n=10000):
 
 RHO_GRID = (0.0, 0.2, 0.4, 0.6, 0.8)
 DF_GRID = (3, 5, 10, 30)
+
+# --- Time-varying dependence arms -------------------------------------------
+# Two mechanisms in which the dependence between component lifetimes is not a
+# single fixed number.  The frailty arm makes the association a consequence of
+# the shared environment; the phase arm lets it take different values in two
+# mission phases.  Neither requires phase-resolved field data: the governing
+# parameter is swept, exactly as Kendall's tau is swept in the copula arm.
+FRAILTY_W = 0.5          # persistent share of the stress variance
+# Largest marginal distortion tolerated in the frailty arm.  The per-(sigma, w)
+# recalibration matches the survival function at the horizon; the residual
+# sup-norm error over the interior of the grid grows with sigma, and beyond
+# this tolerance the arm would no longer be a controlled comparison against
+# the copula arm.  frailty_marginal_diagnostic() records the growth.
+MARGINAL_ERROR_TOL = 0.06
+# Dependence grid for the frailty arm.  It stops at tau = 0.15 because that is
+# where the tolerance above binds (sigma ~ 1.0); the copula arm carries the
+# comparison at higher tau, where the frailty marginals can no longer be held
+# fixed.  FRAILTY_DIAGNOSTIC_SIGMAS spans the uncontrolled region so that the
+# restriction is reported as a measurement rather than asserted.
+FRAILTY_TAU_TARGETS = (0.0, 0.05, 0.10, 0.15)
+FRAILTY_DIAGNOSTIC_SIGMAS = (0.5, 1.0, 1.5, 2.0, 3.0, 4.0)
+PHASE_TAU_GRID = (0.0, 0.20, 0.41, 0.59)
+PHASE_BOUNDARY = 40   # steps; the median first-passage time under S3 independence is 39
+
+
+def _frailty_z_paths(sigma, w_persistent, n_paths, max_steps, seed):
+    """Realisations of Z(t) = sigma (sqrt(w) W + sqrt(1-w) A(t))."""
+    a = stress_paths(n_paths, max_steps, seed_base=seed)
+    rng = np.random.default_rng(np.random.SeedSequence([20260822, seed + 1]))
+    w_draw = rng.normal(size=(n_paths, 1))
+    return sigma * (math.sqrt(w_persistent) * w_draw
+                    + math.sqrt(1.0 - w_persistent) * a)
+
+
+def calibrate_frailty_baseline(sigma, w_persistent, rates=None, horizon=MAX_STEPS,
+                               n_paths=6000, seed=720000):
+    """Baseline rates for which the frailty arm keeps the nominal marginals.
+
+    Returns the baseline vector together with the residual marginal error.  The
+    baseline solves  E[exp(-baseline_i * C(T))] = exp(-rate_i * T),  where
+    C(t) = sum_{s<=t} exp(Z(s)); the expectation is over the shared stress
+    paths.  This is the recalibration the manuscript flags as necessary once a
+    frailty term is introduced, and without it the arm is not a controlled
+    comparison against the copula arm.
+    """
+    rates = FAILURE_RATES if rates is None else rates
+    if sigma == 0.0:
+        return np.array(rates, dtype=float), 0.0
+    z = _frailty_z_paths(sigma, w_persistent, n_paths, horizon, seed)
+    cumulative = np.cumsum(np.exp(z), axis=1)          # (paths, steps)
+    c_end = cumulative[:, -1]
+    baseline = np.empty(len(rates))
+    for i, rate in enumerate(rates):
+        target = math.exp(-rate * horizon)
+        lo, hi = 1e-8, max(rate * 50.0, 1.0)
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            if float(np.mean(np.exp(-mid * c_end))) > target:
+                lo = mid
+            else:
+                hi = mid
+        baseline[i] = 0.5 * (lo + hi)
+    # Residual error over the whole grid, not just the matched endpoint.
+    steps = np.arange(1, horizon + 1)
+    worst = 0.0
+    for i, rate in enumerate(rates):
+        realised = np.mean(np.exp(-baseline[i] * cumulative), axis=0)
+        nominal = np.exp(-rate * steps)
+        worst = max(worst, float(np.max(np.abs(realised - nominal))))
+    return baseline, worst
+
+
+def frailty_tau_from_sigma(sigma, w_persistent, n_paths=3000, horizon=1200):
+    """Kendall's tau between lifetimes induced by (sigma, w)."""
+    if sigma == 0.0:
+        return 0.0
+    baseline, _ = calibrate_frailty_baseline(sigma, w_persistent)
+    z = _frailty_z_paths(sigma, w_persistent, n_paths, horizon, seed=730000)
+    cumulative = np.cumsum(np.exp(z), axis=1)[:, :, None] * baseline
+    rng = np.random.default_rng(np.random.SeedSequence([20260822, 731000]))
+    thresholds = rng.exponential(size=(n_paths, len(baseline)))
+    exceeded = cumulative >= thresholds[:, None, :]
+    observed = exceeded.any(axis=1)
+    lifetimes = np.argmax(exceeded, axis=1).astype(float)
+    keep = observed.all(axis=1)
+    sub = lifetimes[keep]
+    if len(sub) < 200:
+        return float("nan")
+    taus = [kendalltau(sub[:, i], sub[:, j]).statistic
+            for i in range(12) for j in range(i + 1, 12)]
+    return float(np.nanmean(taus))
+
+
+def solve_sigma_for_tau(tau_target, w_persistent=FRAILTY_W, lo=0.0, hi=2.0, tol=0.004):
+    """Stress scale that reproduces a target Kendall's tau.
+
+    The upper bracket is 2.0 because the admissible grid is bounded by
+    MARGINAL_ERROR_TOL long before that: tau(sigma=2) is already above every
+    target in FRAILTY_TAU_TARGETS.
+    """
+    if tau_target == 0.0:
+        return 0.0
+    for _ in range(30):
+        mid = 0.5 * (lo + hi)
+        if frailty_tau_from_sigma(mid, w_persistent) < tau_target:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol:
+            break
+    return 0.5 * (lo + hi)
+
+
+def frailty_job(args):
+    sigma, w_persistent, baseline, tau, run, max_steps = args
+    scenario = {"mode": "S3", "copula": "independence", "dependence": "frailty",
+                "sigma": sigma, "w_persistent": w_persistent,
+                "baseline": np.asarray(baseline)}
+    ev = evaluate_trajectory(simulate_trajectory(scenario, run, max_steps), DEFAULT_K)
+    return {"tau_target": tau, "sigma": sigma, "run": run,
+            "RMST": float(ev["survival"].sum()),
+            "R_horizon": float(ev["survival"][-1]), "TTF": ev["ttf"]}
+
+
+def phase_job(args):
+    tau_early, tau_late, boundary, run, max_steps = args
+    scenario = {"mode": "S3", "copula": "gaussian", "dependence": "phase_copula",
+                "family": "gaussian", "tau_early": tau_early, "tau_late": tau_late,
+                "boundary": boundary}
+    ev = evaluate_trajectory(simulate_trajectory(scenario, run, max_steps), DEFAULT_K)
+    return {"tau_early": tau_early, "tau_late": tau_late, "boundary": boundary,
+            "run": run, "RMST": float(ev["survival"].sum()),
+            "R_horizon": float(ev["survival"][-1]), "TTF": ev["ttf"]}
+
+
+def stress_paths(n_paths, max_steps, rho=0.85, seed_base=700000):
+    """Standardised AR(1) stress paths matching positions_and_soc, vectorised.
+
+    positions_and_soc advances the same recursion one step at a time inside the
+    trajectory loop; reproducing it directly here avoids simulating positions
+    and batteries when only the environmental path is needed.
+    """
+    rng = np.random.default_rng(np.random.SeedSequence([20260822, seed_base]))
+    innovations = rng.normal(size=(n_paths, max_steps)) * math.sqrt(1 - rho ** 2)
+    paths = np.empty((n_paths, max_steps))
+    state = np.zeros(n_paths)
+    for step in range(max_steps):
+        state = rho * state + innovations[:, step]
+        paths[:, step] = state
+    return paths
+
+
+def validate_phase_marginals(n=200000, pairs=((0.0, 0.59), (0.59, 0.0), (0.20, 0.41))):
+    """Check that the phase switch leaves the exponential marginals intact.
+
+    The memorylessness argument says the construction is exact, so this is a
+    direct numerical confirmation rather than a tolerance test: for each
+    (tau_early, tau_late) pair the recovered rate 1/mean(lifetime) is compared
+    with the nominal rate of every component, and the worst relative error over
+    the twelve components is reported.
+    """
+    rows = []
+    for tau_early, tau_late in pairs:
+        rng = np.random.default_rng(np.random.SeedSequence([20260822, 740000]))
+        draws = np.empty((n, len(FAILURE_RATES)))
+        for r in range(n):
+            draws[r] = phase_copula_lifetimes(rng, FAILURE_RATES, "gaussian",
+                                              tau_early, tau_late, PHASE_BOUNDARY)
+        recovered = 1.0 / draws.mean(axis=0)
+        rel = np.abs(recovered - FAILURE_RATES) / FAILURE_RATES
+        rows.append({"tau_early": tau_early, "tau_late": tau_late, "n": n,
+                     "boundary": PHASE_BOUNDARY,
+                     "max_rel_rate_error": float(rel.max()),
+                     "mean_rel_rate_error": float(rel.mean())})
+    table = pd.DataFrame(rows)
+    table.to_csv(OUT / "phase_marginal_validation.csv", index=False)
+    return table
+
+
+def frailty_marginal_diagnostic(sigmas=FRAILTY_DIAGNOSTIC_SIGMAS, w_persistent=FRAILTY_W):
+    """How far the frailty marginals drift as the stress scale is raised.
+
+    For each sigma this records the dependence the mechanism induces and the
+    sup-norm distance between the recalibrated survival function and the
+    nominal exponential, together with the ratio of the recalibrated baseline
+    rates to the nominal ones.  It is the evidence for restricting the frailty
+    sweep to FRAILTY_TAU_TARGETS: the recalibration matches survival at the
+    horizon by construction, but the interior error grows with sigma, so at the
+    stress levels needed to reach the copula arm's upper tau values the two
+    arms would no longer share a marginal.
+    """
+    rates = FAILURE_RATES
+    rows = []
+    for sigma in sigmas:
+        baseline, err = calibrate_frailty_baseline(sigma, w_persistent)
+        ratio = np.asarray(baseline) / np.asarray(rates)
+        rows.append({"sigma": sigma, "w_persistent": w_persistent,
+                     "tau_induced": frailty_tau_from_sigma(sigma, w_persistent),
+                     "max_marginal_abs_error": err,
+                     "baseline_ratio_min": float(ratio.min()),
+                     "baseline_ratio_max": float(ratio.max()),
+                     "within_tolerance": bool(err <= MARGINAL_ERROR_TOL)})
+    table = pd.DataFrame(rows)
+    table.to_csv(OUT / "frailty_marginal_diagnostic.csv", index=False)
+    return table
+
+
+def frailty_calibration_table(targets=FRAILTY_TAU_TARGETS, w_persistent=FRAILTY_W):
+    """Solve sigma for each target tau and recalibrate the baselines.
+
+    Each grid point is admitted only if the recalibrated marginal stays within
+    MARGINAL_ERROR_TOL of the nominal exponential over the whole horizon, so
+    every reported frailty result is a comparison at matched marginals and
+    matched dependence.  A target that cannot meet the tolerance is dropped
+    rather than reported with a distorted marginal.
+    """
+    rows = []
+    for tau in targets:
+        sigma = solve_sigma_for_tau(tau, w_persistent)
+        baseline, marginal_err = calibrate_frailty_baseline(sigma, w_persistent)
+        if marginal_err > MARGINAL_ERROR_TOL:
+            print(f"[frailty] tau={tau:.3f} (sigma={sigma:.3f}) dropped: "
+                  f"marginal error {marginal_err:.4f} > {MARGINAL_ERROR_TOL}")
+            continue
+        rows.append({"tau_target": tau, "sigma": sigma,
+                     "tau_realised": frailty_tau_from_sigma(sigma, w_persistent),
+                     "w_persistent": w_persistent,
+                     "max_marginal_abs_error": marginal_err,
+                     "baseline": baseline})
+    table = pd.DataFrame(rows)
+    table.drop(columns=["baseline"]).to_csv(OUT / "frailty_calibration.csv", index=False)
+    return table
+
+
+def run_frailty_sweep(n_runs, max_steps=MAX_STEPS, workers=None, calibration=None):
+    """Entry point of the frailty arm -- NOT USED BY ANY REPORTED RESULT.
+
+    main() never calls this, and no number in the paper depends on it; see the
+    block comment above frailty_lifetimes for why the arm is reported as a
+    formulation rather than an evaluated result.  Calling it writes
+    frailty_sweep_runs.csv and frailty_sweep_summary.csv, which are not part of
+    the deposited experiment_outputs/ set.
+    """
+    cal = frailty_calibration_table() if calibration is None else calibration
+    jobs = []
+    for _, r in cal.iterrows():
+        jobs.extend([(r.sigma, r.w_persistent, tuple(r.baseline), r.tau_target, run, max_steps)
+                     for run in range(n_runs)])
+    with Pool(processes=workers or WORKERS) as pool:
+        rows = pool.map(frailty_job, jobs, chunksize=200)
+    raw = pd.DataFrame(rows)
+    raw.to_csv(OUT / "frailty_sweep_runs.csv", index=False)
+
+    base = raw[raw.tau_target == 0.0].set_index("run")["RMST"].sort_index()
+    lookup = cal.set_index("tau_target")
+    out = []
+    for tau, g in raw.groupby("tau_target"):
+        s = summarize(g["RMST"].to_numpy())
+        d = (g.set_index("run")["RMST"].sort_index() - base).to_numpy()
+        dse = d.std(ddof=1) / math.sqrt(len(d))
+        out.append({"tau_target": tau, "sigma": float(lookup.loc[tau, "sigma"]),
+                    "tau_realised": float(lookup.loc[tau, "tau_realised"]),
+                    "max_marginal_abs_error": float(lookup.loc[tau, "max_marginal_abs_error"]),
+                    "RMST": s["mean"], "SE": s["se"], "CI_low": s["ci_low"], "CI_high": s["ci_high"],
+                    "R_horizon": g["R_horizon"].mean(),
+                    "delta_RMST_vs_independence": float(d.mean()),
+                    "delta_CI_low": float(d.mean() - 1.96 * dse),
+                    "delta_CI_high": float(d.mean() + 1.96 * dse)})
+    summary = pd.DataFrame(out)
+    summary.to_csv(OUT / "frailty_sweep_summary.csv", index=False)
+    return raw, summary
+
+
+PHASE_BOUNDARY_GRID = (20, 40, 80)
+PHASE_CORNERS = ((0.0, 0.0), (0.59, 0.0), (0.0, 0.59), (0.59, 0.59))
+
+
+def run_phase_boundary_check(n_runs, boundaries=PHASE_BOUNDARY_GRID,
+                             corners=PHASE_CORNERS, max_steps=MAX_STEPS, workers=None):
+    """Is the early-over-late asymmetry an artefact of where the boundary sits?
+
+    The main sweep fixes the phase boundary at the median first-passage time
+    under independence.  That is a defensible choice but it is still a choice,
+    so the corners of the grid are re-evaluated at an earlier and a later
+    boundary.  The comparison of interest is the pair
+    (tau_early, tau_late) = (0.59, 0) against (0, 0.59): if the ordering and
+    the disjointness of the intervals survive all three boundaries, the
+    asymmetry is a property of the mechanism rather than of t_1.
+
+    Replications are paired within each boundary, since the (0, 0) arm is
+    itself boundary-dependent at the realisation level even though its
+    distribution is not.
+    """
+    jobs = [(te, tl, b, run, max_steps) for b in boundaries for (te, tl) in corners
+            for run in range(n_runs)]
+    with Pool(processes=workers or WORKERS) as pool:
+        rows = pool.map(phase_job, jobs, chunksize=200)
+    raw = pd.DataFrame(rows)
+    raw.to_csv(OUT / "phase_boundary_runs.csv", index=False)
+
+    out = []
+    for b, gb in raw.groupby("boundary"):
+        base = gb[(gb.tau_early == 0.0) & (gb.tau_late == 0.0)]
+        base = base.set_index("run")["RMST"].sort_index()
+        for (te, tl), g in gb.groupby(["tau_early", "tau_late"]):
+            s = summarize(g["RMST"].to_numpy())
+            d = (g.set_index("run")["RMST"].sort_index() - base).to_numpy()
+            dse = d.std(ddof=1) / math.sqrt(len(d))
+            out.append({"boundary": b, "tau_early": te, "tau_late": tl,
+                        "RMST": s["mean"], "SE": s["se"],
+                        "delta_RMST_vs_independence": float(d.mean()),
+                        "delta_CI_low": float(d.mean() - 1.96 * dse),
+                        "delta_CI_high": float(d.mean() + 1.96 * dse)})
+    summary = pd.DataFrame(out)
+
+    # The asymmetry test, one row per boundary.
+    tests = []
+    idx = summary.set_index(["boundary", "tau_early", "tau_late"])
+    for b in boundaries:
+        e = idx.loc[(b, 0.59, 0.0)]
+        l = idx.loc[(b, 0.0, 0.59)]
+        tests.append({"boundary": b,
+                      "early_only_delta": float(e.delta_RMST_vs_independence),
+                      "early_only_CI_low": float(e.delta_CI_low),
+                      "early_only_CI_high": float(e.delta_CI_high),
+                      "late_only_delta": float(l.delta_RMST_vs_independence),
+                      "late_only_CI_low": float(l.delta_CI_low),
+                      "late_only_CI_high": float(l.delta_CI_high),
+                      "ratio_early_over_late": float(e.delta_RMST_vs_independence
+                                                     / l.delta_RMST_vs_independence),
+                      "intervals_disjoint": bool(e.delta_CI_low > l.delta_CI_high)})
+    test = pd.DataFrame(tests)
+    summary.to_csv(OUT / "phase_boundary_summary.csv", index=False)
+    test.to_csv(OUT / "phase_boundary_asymmetry.csv", index=False)
+    return raw, summary, test
+
+
+def run_phase_sweep(n_runs, max_steps=MAX_STEPS, workers=None):
+    jobs = [(te, tl, PHASE_BOUNDARY, run, max_steps)
+            for te in PHASE_TAU_GRID for tl in PHASE_TAU_GRID
+            for run in range(n_runs)]
+    with Pool(processes=workers or WORKERS) as pool:
+        rows = pool.map(phase_job, jobs, chunksize=200)
+    raw = pd.DataFrame(rows)
+    raw.to_csv(OUT / "phase_sweep_runs.csv", index=False)
+
+    key = (raw.tau_early == 0.0) & (raw.tau_late == 0.0)
+    base = raw[key].set_index("run")["RMST"].sort_index()
+    out = []
+    for (te, tl), g in raw.groupby(["tau_early", "tau_late"]):
+        s = summarize(g["RMST"].to_numpy())
+        d = (g.set_index("run")["RMST"].sort_index() - base).to_numpy()
+        dse = d.std(ddof=1) / math.sqrt(len(d))
+        out.append({"tau_early": te, "tau_late": tl, "RMST": s["mean"], "SE": s["se"],
+                    "CI_low": s["ci_low"], "CI_high": s["ci_high"],
+                    "R_horizon": g["R_horizon"].mean(),
+                    "delta_RMST_vs_independence": float(d.mean()),
+                    "delta_CI_low": float(d.mean() - 1.96 * dse),
+                    "delta_CI_high": float(d.mean() + 1.96 * dse),
+                    "boundary": PHASE_BOUNDARY})
+    summary = pd.DataFrame(out)
+    summary.to_csv(OUT / "phase_sweep_summary.csv", index=False)
+    return raw, summary
 
 
 def kendall_tau(rho):
@@ -523,18 +1028,16 @@ def simultaneous_bands(raw, bootstrap_reps=1000):
     observed = cube.mean(axis=1)
     se = cube.std(axis=1, ddof=1) / math.sqrt(n)
     boot_max = np.zeros((len(copulas), bootstrap_reps))
-    boot_lower = np.zeros((len(copulas), bootstrap_reps, len(ks)))
-    boot_upper = np.zeros_like(boot_lower)
     for b in range(bootstrap_reps):
         sample = rng.integers(0, n, size=n)
         boot_mean = cube[:, sample, :].mean(axis=1)
         boot_max[:, b] = np.max(np.abs((boot_mean - observed) / np.maximum(se, 1e-12)), axis=1)
-        boot_lower[:, b, :] = boot_mean
-        boot_upper[:, b, :] = boot_mean
 
     rows = []
     for ci, name in enumerate(copulas):
-        crit = float(np.quantile(boot_max[ci], 0.975))
+        # Two-sided sup-t band: the statistic is already max |t|, so the
+        # 1 - alpha quantile gives 100(1 - alpha)% simultaneous coverage.
+        crit = float(np.quantile(boot_max[ci], SUP_T_LEVEL))
         low = observed[ci] - crit * se[ci]
         high = observed[ci] + crit * se[ci]
         for j, k in enumerate(ks):
@@ -552,7 +1055,7 @@ def simultaneous_bands(raw, bootstrap_reps=1000):
             sample = rng.integers(0, n, size=n)
             boot_delta = delta[sample].mean(axis=0)
             max_values[b] = np.max(np.abs((boot_delta - observed_delta) / np.maximum(delta_se, 1e-12)))
-        crit = float(np.quantile(max_values, 0.975))
+        crit = float(np.quantile(max_values, SUP_T_LEVEL))
         low = observed_delta - crit * delta_se
         high = observed_delta + crit * delta_se
         for j, k in enumerate(ks):
@@ -622,7 +1125,7 @@ def correlation_bands(raw, bootstrap_reps=1000):
         for b in range(bootstrap_reps):
             boot = cube[rng.integers(0, n, size=n)].mean(axis=0)
             stats[b] = np.max(np.abs((boot - observed) / np.maximum(se, 1e-12)))
-        crit = float(np.quantile(stats, 0.975))
+        crit = float(np.quantile(stats, SUP_T_LEVEL))
         kind, name = label.split(":", 1)
         for j, rho in enumerate(rhos):
             rows.append({"curve_set": kind, "series": name, "rho": float(rho),
@@ -668,9 +1171,15 @@ def crossover_threshold(raw, bootstrap_reps=2000):
         observed = crossing(delta)
         boot = np.array([crossing(delta[rng.integers(0, len(delta), len(delta))])
                          for _ in range(bootstrap_reps)])
+        # A resample in which the mean difference never changes sign yields no
+        # crossing.  Those draws are dropped, so the interval is conditional on
+        # a sign change existing; the share dropped is recorded alongside it.
+        n_valid = int(np.count_nonzero(~np.isnan(boot)))
         low, high = np.nanpercentile(boot, [2.5, 97.5])
         rows.append({"copula": name, "kappa_star": observed, "kappa_star_CI_low": low,
-                     "kappa_star_CI_high": high, "K_star": observed * W_MAX})
+                     "kappa_star_CI_high": high, "K_star": observed * W_MAX,
+                     "bootstrap_reps": int(bootstrap_reps), "bootstrap_valid": n_valid,
+                     "bootstrap_no_crossing_pct": 100.0 * (bootstrap_reps - n_valid) / bootstrap_reps})
     out = pd.DataFrame(rows)
     out.to_csv(OUT / "threshold_crossover.csv", index=False)
     return out
@@ -723,6 +1232,71 @@ def design_zones(raw, bands, crossover):
     out["kappa_star_mean"] = float(crossover["kappa_star"].mean())
     out.to_csv(OUT / "design_zones.csv", index=False)
     return out
+
+
+def make_dependence_figure(phase_summary, boundary_test):
+    """Figure 10: the phase-switching copula and its boundary sensitivity.
+
+    Panel (a) is the (tau_early, tau_late) map at the nominal boundary.  Panel
+    (b) is the check that the early-over-late asymmetry in panel (a) is a
+    property of the mechanism rather than of where the boundary was placed:
+    the two single-phase corners are re-evaluated at an earlier and a later
+    boundary, and the intervals are plotted side by side.
+    """
+    OUT.mkdir(parents=True, exist_ok=True)
+    plt.rcParams.update({"font.family": "serif", "font.size": 10})
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
+
+    grid = sorted(phase_summary.tau_early.unique())
+    late = sorted(phase_summary.tau_late.unique())
+    mat = np.full((len(grid), len(late)), np.nan)
+    piv = phase_summary.set_index(["tau_early", "tau_late"])["delta_RMST_vs_independence"]
+    for i, te in enumerate(grid):
+        for j, tl in enumerate(late):
+            if (te, tl) in piv.index:
+                mat[i, j] = float(piv.loc[(te, tl)])
+    im = axes[0].imshow(mat, origin="lower", cmap="viridis", aspect="auto")
+    axes[0].set_xticks(range(len(late)), [f"{v:.2f}" for v in late])
+    axes[0].set_yticks(range(len(grid)), [f"{v:.2f}" for v in grid])
+    for i in range(len(grid)):
+        for j in range(len(late)):
+            if not math.isnan(mat[i, j]):
+                shade = "white" if mat[i, j] < np.nanmax(mat) * 0.6 else "black"
+                axes[0].text(j, i, f"{mat[i, j]:+.2f}", ha="center", va="center",
+                             fontsize=8, color=shade)
+    axes[0].set(xlabel=r"$\tau_{\mathrm{late}}$", ylabel=r"$\tau_{\mathrm{early}}$",
+                title=r"(a) Phase-switching copula: $\Delta$RMST (steps)")
+    # No colorbar label: the panel title already names the quantity, and a
+    # label here collides with panel (b)'s y-axis label.
+    fig.colorbar(im, ax=axes[0], shrink=0.85)
+
+    t = boundary_test.sort_values("boundary")
+    x = np.arange(len(t))
+    width = 0.34
+    for offset, key, colour, marker, label in (
+            (-width / 2, "early_only", "#00634A", "o", r"early phase only ($\tau_{\mathrm{early}}=0.59$)"),
+            (+width / 2, "late_only", "#8C4A00", "s", r"late phase only ($\tau_{\mathrm{late}}=0.59$)")):
+        mid = t[f"{key}_delta"].to_numpy()
+        lo = t[f"{key}_CI_low"].to_numpy()
+        hi = t[f"{key}_CI_high"].to_numpy()
+        axes[1].errorbar(x + offset, mid, yerr=[mid - lo, hi - mid], fmt=marker,
+                         color=colour, markersize=6, capsize=4, elinewidth=1.1,
+                         linestyle="none", label=label)
+    axes[1].axhline(0, color="black", linewidth=0.8)
+    axes[1].set_xticks(x, [str(int(b)) for b in t.boundary])
+    axes[1].set(xlabel=r"Phase boundary $t_1$ (steps)",
+                ylabel=r"$\Delta$RMST vs. independence (steps)",
+                title=r"(b) Boundary sensitivity of the phase asymmetry")
+    axes[1].grid(alpha=0.22, linewidth=0.6, axis="y")
+    # Headroom for a horizontal legend: at t_1 = 20 the late-phase point sits
+    # near the top of the data range and a corner legend would cover it.
+    axes[1].margins(y=0.30)
+    axes[1].legend(fontsize=8, frameon=False, loc="upper center", ncol=2,
+                   handletextpad=0.4, columnspacing=1.4)
+
+    fig.savefig(OUT / "Figure_10_time_varying_dependence.pdf", dpi=300)
+    fig.savefig(OUT / "Figure_10_time_varying_dependence.png", dpi=300)
+    plt.close(fig)
 
 
 def make_correlation_figure(raw, summary, bands=None):
@@ -958,6 +1532,8 @@ def main():
     parser.add_argument("--edge-only", action="store_true")
     parser.add_argument("--figures-only", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--dependence-only", action="store_true")
+    parser.add_argument("--boundary-only", action="store_true")
     args = parser.parse_args()
     n = 100 if args.smoke else args.runs
     OUT.mkdir(parents=True, exist_ok=True)
@@ -970,6 +1546,20 @@ def main():
         return
     if args.verify_only:
         print(verify_engine(max_steps=args.steps))
+        return
+    if args.boundary_only:
+        # Re-uses the stored phase map; only the boundary corners are simulated.
+        _, _, boundary_test = run_phase_boundary_check(n, max_steps=args.steps)
+        make_dependence_figure(pd.read_csv(OUT / "phase_sweep_summary.csv"), boundary_test)
+        print(boundary_test.to_string())
+        return
+    if args.dependence_only:
+        print(validate_phase_marginals(20000 if args.smoke else 200000))
+        _, phase_summary = run_phase_sweep(n, max_steps=args.steps)
+        _, _, boundary_test = run_phase_boundary_check(n, max_steps=args.steps)
+        make_dependence_figure(phase_summary, boundary_test)
+        print(phase_summary)
+        print(boundary_test)
         return
     if args.edge_only:
         _, edge_summary = run_edge_sensitivity(n, max_steps=args.steps)
@@ -985,6 +1575,16 @@ def main():
     crossover = crossover_threshold(raw)
     zones = design_zones(raw, bands, crossover)
     make_figures(raw, summary, bands)
+    # The dependence-strength sweep behind Figure 8 and the time-varying arms
+    # behind Figure 10.  These belong in the default run: without them the
+    # command does not reproduce every figure in the paper.
+    corr_raw, corr_summary = run_correlation_sweep(n, max_steps=args.steps, threshold_raw=raw)
+    corr_bands = correlation_bands(corr_raw)
+    make_correlation_figure(corr_raw, corr_summary, corr_bands)
+    phase_marginals = validate_phase_marginals(20000 if args.smoke else 200000)
+    _, phase_summary = run_phase_sweep(n, max_steps=args.steps)
+    _, _, boundary_test = run_phase_boundary_check(n, max_steps=args.steps)
+    make_dependence_figure(phase_summary, boundary_test)
     metadata = {"runs": n, "steps": args.steps, "W_max": W_MAX, "K_values": list(range(2, W_MAX + 1)), "default_K": DEFAULT_K, "copulas": list(COPULAS), "edge_models": ["bernoulli", "deterministic_q0_0.3", "deterministic_q0_0.5", "deterministic_q0_0.7"], "seed_scheme": "SeedSequence([20260822, run_id])", "metric": "RMST(T)=sum first-passage survival indicators; R_horizon=survival at final epoch"}
     (OUT / "experiment_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(summary.head())
@@ -995,6 +1595,10 @@ def main():
     print(geometry)
     print(crossover)
     print(zones)
+    print(corr_summary.head())
+    print(phase_marginals)
+    print(phase_summary.head())
+    print(boundary_test)
 
 
 if __name__ == "__main__":

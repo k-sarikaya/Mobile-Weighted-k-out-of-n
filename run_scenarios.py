@@ -44,9 +44,8 @@ def check_mission_success_proposed_and_baselines(swarm, Rc, K_threshold, H_max, 
     
     # 2. Baseline 3: Consecutive-k-out-of-n:F Swarm (Dui 2021)
     B3_t = 1
-    n_nodes = len(swarm)
-    for idx in range(n_nodes):
-        if not swarm[idx].active and not swarm[(idx+1)%n_nodes].active and not swarm[(idx+2)%n_nodes].active:
+    for idx in range(len(swarm) - 2):
+        if not swarm[idx].active and not swarm[idx+1].active and not swarm[idx+2].active:
             B3_t = 0
             break
             
@@ -93,10 +92,8 @@ def check_mission_success_proposed_and_baselines(swarm, Rc, K_threshold, H_max, 
     # 3. Baseline 2: Dynamic Multistate Network without Weights (Xu 2022)
     B2_t = 1 if len(largest_cc) >= 9 else 0
     
-    # A_t: Capacity event.
     total_active_weight = sum(a.weight for a in active_agents)
     A_t = 1 if total_active_weight >= K_threshold else 0
-
     B_t = 1 if cc_weight >= K_threshold else 0
     
     # Latency constraint using Log-Normal hop delays

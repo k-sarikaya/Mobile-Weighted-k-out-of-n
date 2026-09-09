@@ -1,0 +1,15 @@
+# Exact package versions used to produce the results reported in the paper.
+#
+# Environment: CPython 3.12.5, Windows 11 (win-amd64).
+# requirements.txt gives the minimum supported versions; this file pins the
+# versions actually installed when experiment_outputs/ was generated, for
+# bit-level reproduction of the reported numbers.
+#
+#     pip install -r requirements-lock.txt
+#
+numpy==2.1.1
+scipy==1.14.1
+pandas==2.2.2
+networkx==3.6.1
+matplotlib==3.9.2
+seaborn==0.13.2

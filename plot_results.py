@@ -1,12 +1,10 @@
 import os
 import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-# import seaborn as sns
+import seaborn as sns
 
 # Professional journal styling
-# sns.set_theme(style="ticks")
+sns.set_theme(style="ticks")
 plt.rcParams.update({
     'font.family': 'serif',
     'font.size': 14,
@@ -21,7 +19,11 @@ plt.rcParams.update({
 })
 
 res_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
-fig_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
+# Figures are written beside this script, under the filenames the paper uses,
+# so that figure_mapping.md can be followed literally.  The earlier version
+# wrote legacy filenames into a "figures" directory one level above the script,
+# which placed them outside the repository.
+fig_dir = os.path.dirname(os.path.abspath(__file__))
 
 # Ensure output directory exists
 os.makedirs(fig_dir, exist_ok=True)
@@ -50,8 +52,8 @@ def plot_s1():
     plt.grid(True)
     plt.legend(loc='lower left')
     plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, "fig3_S1_spatial_results.pdf"), dpi=300)
-    plt.savefig(os.path.join(fig_dir, "fig3_S1_spatial_results.png"), dpi=300)
+    plt.savefig(os.path.join(fig_dir, "Figure_4.pdf"), dpi=300)
+    plt.savefig(os.path.join(fig_dir, "Figure_4.png"), dpi=300)
     plt.close()
 
 def plot_s2():
@@ -78,8 +80,8 @@ def plot_s2():
     plt.grid(True)
     plt.legend(loc='lower left')
     plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, "fig4_S2_temporal_results.pdf"), dpi=300)
-    plt.savefig(os.path.join(fig_dir, "fig4_S2_temporal_results.png"), dpi=300)
+    plt.savefig(os.path.join(fig_dir, "Figure_5.pdf"), dpi=300)
+    plt.savefig(os.path.join(fig_dir, "Figure_5.png"), dpi=300)
     plt.close()
 
 def plot_s3():
@@ -125,8 +127,8 @@ def plot_s3():
     plt.grid(True)
     plt.legend(loc='lower left')
     plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, "fig5_S3_joint_results.pdf"), dpi=300)
-    plt.savefig(os.path.join(fig_dir, "fig5_S3_joint_results.png"), dpi=300)
+    plt.savefig(os.path.join(fig_dir, "Figure_6.pdf"), dpi=300)
+    plt.savefig(os.path.join(fig_dir, "Figure_6.png"), dpi=300)
     plt.close()
 
 def plot_s3_baselines():
@@ -153,8 +155,8 @@ def plot_s3_baselines():
     plt.grid(True)
     plt.legend(loc='lower left')
     plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, "fig5b_S3_baselines_comparison.pdf"), dpi=300)
-    plt.savefig(os.path.join(fig_dir, "fig5b_S3_baselines_comparison.png"), dpi=300)
+    plt.savefig(os.path.join(fig_dir, "Figure_7.pdf"), dpi=300)
+    plt.savefig(os.path.join(fig_dir, "Figure_7.png"), dpi=300)
     plt.close()
 
 def plot_mttf():
@@ -237,6 +239,9 @@ if __name__ == "__main__":
     plot_s2()
     plot_s3()
     plot_s3_baselines()
-    plot_mttf()
-    plot_sensitivity()
-    print("Plots generated successfully.")
+    print("Figures 4-7 written to", fig_dir)
+    # plot_mttf() and plot_sensitivity() are retained for reference but are not
+    # called: neither appears in the paper.  plot_mttf() reports MTTF, which the
+    # revision replaced by finite-horizon RMST, and the sensitivity figure was
+    # superseded by Figure 8 from run_experiments.py.  Call them directly if
+    # those older views are wanted.

@@ -28,16 +28,14 @@ This document details the complete parameters and configurations used in the sim
 - **Scenarios**:
   - **S1 (Spatial-only)**: Perfect node reliability ($\lambda_i = 0.0$, $p_i(t) = 1.0$), active agent movement.
   - **S2 (Temporal-only)**: Hovering tight formation, exponential component degradation under independence.
-  - **S3 (Joint)**: Combining spatial movement and component degradation under five dependence structures:
+  - **S3 (Joint)**: Combining spatial movement and component degradation under three dependence structures:
     - **Independent Copula**: $\rho = 0.0$
-    - **Gaussian Copula**: Correlation $\rho = 0.6$ (Kendall's $\tau \approx 0.41$)
+    - **Gaussian Copula**: Correlation $\rho = 0.6$
     - **Student-$t$ Copula**: Correlation $\rho = 0.6$, Degrees of Freedom $\nu = 3$
-    - **Clayton Copula**: Parameter $\theta = 1.39$ (Kendall's $\tau \approx 0.41$)
-    - **Gumbel Copula**: Parameter $\theta = 1.69$ (Kendall's $\tau \approx 0.41$)
 - **Sensitivity Sweep**:
   - Correlation parameter $\rho \in [0.0, 0.2, 0.4, 0.6, 0.8]$
   - Degrees of freedom $\nu \in [3, 5, 10, 30]$
 
 ## Simulation Execution
 - **Monte Carlo Replications ($N_{\mathrm{rep}}$)**: 5,000
-- **Random Number Generation Base Seed**: 42 (ensures exact reproducibility across all parallel Monte Carlo workers)
+- **Random Number Generation Seed**: 42 (ensures exact reproducibility of joint copula samples and failure trajectories)
